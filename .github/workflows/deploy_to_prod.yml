@@ -1,0 +1,82 @@
+name: Deployment
+on:
+  push:
+    branches:
+      - master
+jobs:
+  start-runner:
+    name: Start EC2 Runner
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-ec2-runner.outputs.label }}
+      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
+    steps:
+      - name: Get AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Start EC2 Runner
+        id: start-ec2-runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: start
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          ec2-image-id: ${{ secrets.AWS_GH_RUNNER_AMI }}
+          ec2-instance-type: t3.small
+          subnet-id: subnet-05d59733f1ed6a097
+          security-group-id: sg-0f8e70e2830aa27a6
+          aws-resource-tags: >
+            [
+              {"Key": "Name", "Value": "GitHub Runner"},
+              {"Key": "GitHub", "Value": "true"},
+              {"Key": "GitHubRepository", "Value": "${{ github.repository }}"}
+            ]
+  terraform-deploy:
+    name: Terraform Deploy
+    needs: start-runner
+    runs-on: ${{ needs.start-runner.outputs.label }}
+    steps:
+      - name: Get AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_TF_ROLE_ARN }}
+          role-duration-seconds: 3600
+          role-session-name: terraform-deploy
+      - uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+      - uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.9
+      - name: Clone Repo
+        uses: actions/checkout@master
+      - name: Terraform Initialization
+        run: terraform init --backend-config=config/prod/backend.conf
+      - name: Terraform Apply
+        run: terraform apply --var-file=config/prod/variables.tfvars --auto-approve
+  terminate-runner:
+    name: Terminate EC2 Runner
+    needs:
+      - start-runner
+      - terraform-deploy
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    steps:
+      - name: Get AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Terminate EC2 Runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: stop
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          label: ${{ needs.start-runner.outputs.label }}
+          ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}

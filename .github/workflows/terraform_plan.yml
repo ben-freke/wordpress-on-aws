@@ -1,0 +1,141 @@
+name: Terraform Plan
+on:
+  pull_request:
+    branches:
+      - master
+jobs:
+  start-runner:
+    name: Start EC2 Runner
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-ec2-runner.outputs.label }}
+      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
+    steps:
+      - name: Get AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Start EC2 Runner
+        id: start-ec2-runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: start
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          ec2-image-id: ${{ secrets.AWS_GH_RUNNER_AMI }}
+          ec2-instance-type: t3.small
+          subnet-id: subnet-05d59733f1ed6a097
+          security-group-id: sg-0f8e70e2830aa27a6
+          aws-resource-tags: >
+            [
+              {"Key": "Name", "Value": "GitHub Runner"},
+              {"Key": "GitHub", "Value": "true"},
+              {"Key": "GitHubRepository", "Value": "${{ github.repository }}"}
+            ]
+  terraform-plan:
+    name: Terraform Plan
+    needs: start-runner
+    runs-on: ${{ needs.start-runner.outputs.label }}
+    steps:
+      - name: Get AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_TF_ROLE_ARN }}
+          role-duration-seconds: 3600
+          role-session-name: terraform-deploy
+
+      - uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+
+      - uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.9
+
+      - name: Clone Repo
+        id: clone
+        uses: actions/checkout@master
+
+      - name: Terraform Initialization
+        id: init
+        run: terraform init --backend-config=config/prod/backend.conf
+
+      - name: Post Init
+        if: always() && (steps.init.outcome == 'success' || steps.init.outcome == 'failure')
+        uses: robburger/terraform-pr-commenter@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        with:
+          commenter_type: init
+          commenter_input: ${{ format('{0}{1}', steps.init.outputs.stdout, steps.init.outputs.stderr) }}
+          commenter_exitcode: ${{ steps.init.outputs.exitcode }}
+
+      - name: Terraform Format
+        id: fmt
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Post Format
+        if: always() && (steps.fmt.outcome == 'success' || steps.fmt.outcome == 'failure')
+        uses: robburger/terraform-pr-commenter@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        with:
+          commenter_type: fmt
+          commenter_input: ${{ format('{0}{1}', steps.fmt.outputs.stdout, steps.fmt.outputs.stderr) }}
+          commenter_exitcode: ${{ steps.fmt.outputs.exitcode }}
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+
+      - name: Post Validate
+        if: always() && (steps.validate.outcome == 'success' || steps.validate.outcome == 'failure')
+        uses: robburger/terraform-pr-commenter@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        with:
+          commenter_type: validate
+          commenter_input: ${{ format('{0}{1}', steps.validate.outputs.stdout, steps.validate.outputs.stderr) }}
+          commenter_exitcode: ${{ steps.validate.outputs.exitcode }}
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan --var-file=config/prod/variables.tfvars -no-color -out workspace.plan
+
+      - name: Post Plan
+        id: post
+        if: always() && (steps.plan.outcome == 'success' || steps.plan.outcome == 'failure')
+        uses: robburger/terraform-pr-commenter@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        with:
+          commenter_type: plan
+          commenter_input: ${{ format('{0}{1}', steps.plan.outputs.stdout, steps.plan.outputs.stderr) }}
+          commenter_exitcode: ${{ steps.plan.outputs.exitcode }}
+
+  terminate-runner:
+    name: Terminate EC2 Runner
+    needs:
+      - start-runner
+      - terraform-plan
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    steps:
+      - name: Get AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Terminate EC2 Runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: stop
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          label: ${{ needs.start-runner.outputs.label }}
+          ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}

@@ -1,0 +1,6 @@
+resource_name_prefix = "resource_name_prefix"
+region               = "region"
+environment          = "environment"
+core_hosted_zone     = "core_hosted_zone"
+default_domain       = "default_domain"
+docker_image         = "wordpress:latest"
